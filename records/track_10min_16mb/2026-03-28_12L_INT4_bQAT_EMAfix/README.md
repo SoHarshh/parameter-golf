@@ -1,12 +1,13 @@
 # 12L INT4 bQAT + EMA Fix + Deterministic QAT
 
-**val_bpb: ~1.165** (seed 1, post-TTT estimated) | **15.90 MB** | 8×H100 SXM
+**val_bpb: 1.1594** (seed 3, full TTT) | **15.97 MB** | 8×H100 SXM
 
 ## Results (8×H100 80GB SXM)
 
-| Seed | step_avg | steps | Pre-TTT bpb | Post-TTT bpb | QAT trigger | Artifact |
-|------|----------|-------|-------------|--------------|-------------|----------|
-| 1    | ~115ms   | 5021  | 1.1703      | ~1.165       | step 3500 (65% wallclock) | 15,899,385 |
+| Seed | steps | Pre-quant val/bpb | Post-quant bpb | Post-TTT bpb | QAT trigger | Artifact |
+|------|-------|-------------------|----------------|--------------|-------------|----------|
+| 1    | 5021  | 1.1683            | 1.1703         | ~1.165       | 65% wallclock | 15,899,385 |
+| 3    | —     | 1.1729            | 1.2002         | **1.1594**   | 65% wallclock | 15,967,640 |
 
 ## Architecture
 
