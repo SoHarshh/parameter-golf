@@ -1580,6 +1580,22 @@ def main() -> None:
         zero_grad_all()
         train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
 
+    # Pre-compute model FLOPs for MFU logging (zero runtime overhead — pure Python math).
+    # Formula: 3× forward FLOPs (fwd + bwd ≈ 3×fwd). Forward FLOPs per token per layer:
+    #   attn projections: 2*D*(D + kv_dim + kv_dim + D)
+    #   attn matrix (QK + AV, GQA-aware): 4 * seq_len * num_heads * head_dim
+    #   MLP (up + down): 4 * D * mlp_dim
+    _head_dim = args.model_dim // args.num_heads
+    _kv_dim = args.num_kv_heads * _head_dim
+    _mlp_dim = int(args.mlp_mult * args.model_dim)
+    _attn_proj = 2 * args.model_dim * (args.model_dim + _kv_dim + _kv_dim + args.model_dim)
+    _attn_mat = 4 * args.train_seq_len * args.num_heads * _head_dim
+    _mlp = 4 * args.model_dim * _mlp_dim
+    _fwd_flops_per_token = args.num_layers * (_attn_proj + _attn_mat + _mlp)
+    _flops_per_step = 3 * _fwd_flops_per_token * args.train_batch_tokens  # fwd+bwd
+    _H100_PEAK_FLOPS = 989e12  # H100 SXM BF16 tensor core theoretical peak per GPU
+    log0(f"mfu_ref: fwd_flops_per_token={_fwd_flops_per_token/1e6:.1f}M flops_per_step={_flops_per_step/1e12:.2f}T")
+
     # MAIN TRAINING LOOP
     training_time_ms = 0.0
     stop_after_step: int | None = None
@@ -1687,15 +1703,19 @@ def main() -> None:
             and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None)
         )
         if should_log_train:
+            _step_ms = approx_training_time_ms / step
+            _mfu = _flops_per_step / world_size / (_step_ms / 1000.0) / _H100_PEAK_FLOPS
             log0(
                 f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
+                f"train_time:{approx_training_time_ms:.0f}ms step_avg:{_step_ms:.2f}ms "
+                f"mfu:{_mfu:.1%}"
             )
             if wandb_enabled:
                 wandb.log({
                     "train/loss": train_loss.item(),
                     "train/lr_scale": scale,
-                    "train/step_ms": approx_training_time_ms / step,
+                    "train/step_ms": _step_ms,
+                    "train/mfu": _mfu,
                 }, step=step)
 
         reached_cap = max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
