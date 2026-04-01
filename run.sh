@@ -239,6 +239,20 @@ case "$CONFIG" in
     torchrun --standalone --nproc_per_node=8 train_gpt_v2.py
     ;;
 
+  v9_13l_int4attn)
+    echo "=== Phase 9 H100: 13L + INT4 MLP + INT4 Attn + VE (new depth via attn INT4 savings) ==="
+    # INT4 attn saves ~1.2MB vs INT6 attn → enough budget for 13th layer within 16MB
+    # Expected: 13/12 * 137ms ≈ 149ms/step, ~4040 steps. Gain from depth vs loss from INT4 attn = unknown
+    # Last c_k stays FP16 (hardcoded exemption), protecting the most numerically sensitive weight
+    export RUN_ID=v9_13l_int4attn_seed${SEED:-1} SEED=${SEED:-1} \
+           NUM_LAYERS=13 MLP_QUANT_BITS=4 ATTN_QAT_BITS=4 \
+           XSA_LAST_N=4 EMA_ENABLED=1 SWA_ENABLED=0 \
+           ROPE_DIMS=16 LN_SCALE=1 LATE_QAT_THRESHOLD=0.9 TTT_ENABLED=1 \
+           LATE_QAT_FRAC=0.65 VAL_LOSS_EVERY=1000 \
+           VALUE_EMBED_LAYERS=2 VALUE_EMBED_DIM=128
+    torchrun --standalone --nproc_per_node=8 train_gpt_v2.py
+    ;;
+
   v8_static)
     echo "=== Phase 8 H100: VE + static_graph DDP (test VE overhead fix) ==="
     # Same as v7_ve but DDP(static_graph=True) — tests if overhead drops from 137ms to ~110ms
@@ -260,6 +274,30 @@ case "$CONFIG" in
            LATE_QAT_FRAC=0.65 VAL_LOSS_EVERY=1000 \
            VALUE_EMBED_LAYERS=1 VALUE_EMBED_DIM=64
     torchrun --standalone --nproc_per_node=8 train_gpt_v2.py
+    ;;
+
+  v10_banked)
+    echo "=== Phase 10 H100: Model Banking + Parallel Muon (train_gpt_v3.py) ==="
+    # Full model banking rewrite: qo_bank[24,512,512], kv_bank[24,256,512], mlp_up_bank[12,1536,512], mlp_down_bank[12,512,1536]
+    # Parallel Muon: async reduce-scatter → sharded NS5 → all-gather. No DDP.
+    # Expected: ~90-100ms/step → ~6000-6700 steps → ~1.132-1.139 BPB
+    export RUN_ID=v10_banked_seed${SEED:-1} SEED=${SEED:-1} \
+           NUM_LAYERS=12 MLP_QUANT_BITS=4 XSA_LAST_N=4 EMA_ENABLED=1 SWA_ENABLED=0 \
+           ROPE_DIMS=16 LN_SCALE=1 LATE_QAT_THRESHOLD=0.9 TTT_ENABLED=1 \
+           LATE_QAT_FRAC=0.65 VAL_LOSS_EVERY=1000 \
+           VALUE_EMBED_LAYERS=2 VALUE_EMBED_DIM=128
+    torchrun --standalone --nproc_per_node=8 train_gpt_v3.py
+    ;;
+
+  v10_banked_proxy)
+    echo "=== Phase 10 PROXY: Model Banking + Parallel Muon single-GPU smoke test ==="
+    # Single GPU, 300 steps, no wallclock cap. Verifies correctness and baseline loss.
+    export RUN_ID=v10_banked_proxy SEED=${SEED:-1} MAX_WALLCLOCK_SECONDS=0 \
+           ITERATIONS=300 VAL_LOSS_EVERY=100 \
+           NUM_LAYERS=12 MLP_QUANT_BITS=4 XSA_LAST_N=4 EMA_ENABLED=1 SWA_ENABLED=0 \
+           ROPE_DIMS=16 LN_SCALE=1 LATE_QAT_THRESHOLD=0.9 TTT_ENABLED=0 \
+           VALUE_EMBED_LAYERS=2 VALUE_EMBED_DIM=128
+    torchrun --standalone --nproc_per_node=1 train_gpt_v3.py
     ;;
 
   v5_rownorm)
@@ -292,8 +330,10 @@ case "$CONFIG" in
     echo "Phase 3:   v3_abl | proxy_v3 | v3_h100"
     echo "Phase 4:   proxy_v4 | v4_h100  (EMA+LateQAT fix, threshold=0.9)"
     echo "Phase 6:   v6_parallel  (Parallel Muon: DEPRECATED)"
+  echo "Phase 10:  v10_banked | v10_banked_proxy  (Model Banking + Parallel Muon, train_gpt_v3.py)"
     echo "Phase 7:   v7_ve | v7_ve_small  (Value Embeddings)"
-    echo "Phase 8:   v8_static  (VE + DDP static_graph, overhead fix test)"
+    echo "Phase 8:   v8_static  (VE + DDP static_graph, overhead fix test — no improvement found)"
+    echo "Phase 9:   v9_13l_int4attn  (13L + INT4 MLP + INT4 Attn + VE, novel depth bet)"
     exit 1
     ;;
 esac
